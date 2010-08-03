@@ -121,4 +121,57 @@ struct message {
 	} pl;
 };
 
+inline struct evbuffer *
+message_get_payload(struct message *msg)
+{
+	return msg->payload;
+}
+
+inline ev_uint32_t
+message_get_type(const struct message *msg)
+{
+	return msg->type;
+}
+
+inline ev_uint32_t
+message_get_length(const struct message *msg)
+{
+	return msg->length;
+}
+
+inline ev_uint32_t
+message_get_origin(const struct message *msg)
+{
+	return msg->origin_id;
+}
+
+inline ev_uint32_t
+message_get_destination(const struct message *msg)
+{
+	return msg->destination_id;
+}
+
+inline const char *
+message_payload_get_error_msg(const struct message *msg)
+{
+	return msg->pl.error_msg;
+}
+
+inline const char *
+message_payload_get_file_name(const struct message *msg)
+{
+	return msg->pl.file_name;
+}
+
+inline property_list *
+message_payload_get_properties(const struct message *msg)
+{
+	return &msg->pl.properties;
+}
+
+inline file_list *
+message_payload_get_files(const struct message *msg)
+{
+	return &msg->pl.files;
+}
 #endif
