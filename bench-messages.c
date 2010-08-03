@@ -104,6 +104,17 @@ property_list_clear(struct property_list *props)
 	}
 }
 
+static void
+property_list_move(struct property_list *to, struct property_list *from)
+{
+	struct property *prop;
+
+	while ((prop = TAILQ_FIRST(from))) {
+		TAILQ_REMOVE(from, prop, next);
+		TAILQ_INSERT_TAIL(to, prop, next);
+	}
+}
+
 static int
 file_list_parse(struct file_list *files, struct evbuffer *buf)
 {
@@ -119,7 +130,7 @@ file_list_parse(struct file_list *files, struct evbuffer *buf)
 			goto out;
 		free(ln);
 
-		TAILQ_INSERT(files, fe, next);
+		TAILQ_INSERT_TAIL(files, fe, next);
 	}
 
 	return MSGST_OK;
@@ -148,26 +159,6 @@ file_list_clear(struct file_list *files)
 		free(fe->name);
 		free(fe);
 	}
-}
-
-static int
-message_parse_header(struct message *msg, struct evbuffer *buf)
-{
-	assert(msg->type == MSG_UNKNOWN);
-	if (evbuffer_get_length(buf) < 16)
-		return MSGST_CONT;
-
-	msg->type = pop_uint32(buf);
-	msg->length = pop_uint32(buf);
-	msg->origin_id = pop_uint32(buf);
-	msg->destination_id = pop_uint32(buf);
-	msg->length_remaining = msg->length;
-
-	if (msg->type <= MSG_TYPE_MIN ||
-	    msg->type >= MSG_TYPE_MAX)
-		return MSGST_FAIL;
-
-	return MSGST_OK;
 }
 
 struct message *
@@ -228,21 +219,43 @@ message_destroy(struct message *msg)
 }
 
 int
-message_parse(struct message *msg, struct evbuffer *buf)
+message_parse_header(struct message *msg, struct evbuffer *buf)
 {
-	int amt;
+	assert(msg->type == MSG_UNKNOWN);
+	if (evbuffer_get_length(buf) < 16)
+		return MSGST_CONT;
 
-	if (msg->type == MSG_UNKNOWN) {
-		int rv = message_parse_header(buf, msg);
-		if (rv <= MSGST_CONT)
-			return rv;
-	}
+	msg->type = pop_uint32(buf);
+	msg->length = pop_uint32(buf);
+	msg->origin_id = pop_uint32(buf);
+	msg->destination_id = pop_uint32(buf);
+	msg->length_remaining = msg->length;
 
+	if (msg->type <= MSG_TYPE_MIN ||
+	    msg->type >= MSG_TYPE_MAX)
+		return MSGST_FAIL;
+
+	return MSGST_OK;
+}
+
+int
+message_read_payload(struct message *msg, struct evbuffer *buf)
+{
 	amt = evbuffer_remove_buffer(buf, msg->payload, msg->length_remaining);
 	assert(amt <= msg->length_remaining);
 	msg->length_remaining -= amt;
 	if (msg->length_remaining)
 		return MSGST_CONT;
+
+	return MSGST_OK;
+}
+
+int
+message_parse_payload(struct message *msg)
+{
+	int amt;
+
+	assert(msg->type != MSG_UNKNOWN);
 
 	switch (msg->type) {
 	case MSG_GREETING_REQ:
@@ -326,7 +339,8 @@ message_encode_greeting_rsp(struct message *msg, ev_uint32_t client_id, struct e
 
 void
 message_encode_peer_notice(struct message *msg, ev_uint32_t peer_id,
-			   struct property_list *props, struct evbuffer *outbuf)
+			   const struct property_list *props,
+			   struct evbuffer *outbuf)
 {
 	msg->type = MSG_PEER_NOTICE;
 	msg->origin_id = peer_id;
@@ -400,14 +414,11 @@ message_encode_send_file(struct message *msg, ev_uint32_t origin,
 
 void
 message_encode_file_contents(struct message *msg, ev_uint32_t origin,
-			     ev_uint32_t dest, const char *fn,
-			     struct evbuffer *data,
-			     struct evbuffer *outbuf)
+			     ev_uint32_t dest, struct evbuffer *outbuf)
 {
 	msg->type = MSG_FILE_CONTENTS;
 	msg->origin_id = origin;
 	msg->destination_id = dest;
-	evbuffer_add_buffer(msg->payload, data);
 	message_encode(msg, outbuf);
 }
 
