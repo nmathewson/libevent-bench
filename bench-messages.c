@@ -36,7 +36,7 @@ push_uint32(struct evbuffer *buf, ev_uint32_t n)
 	evbuffer_add(buf, &n, sizeof(n));
 }
 
-static int
+int
 property_list_add(property_list *props, const char *k, const char *v)
 {
 	struct property *prop;
@@ -91,7 +91,7 @@ property_list_encode(struct property_list *props, struct evbuffer *buf)
 		evbuffer_add_printf(buf, "%s %s\n", prop->name, prop->value);
 }
 
-static void
+void
 property_list_clear(struct property_list *props)
 {
 	struct property *prop;
@@ -104,7 +104,7 @@ property_list_clear(struct property_list *props)
 	}
 }
 
-static void
+void
 property_list_move(struct property_list *to, struct property_list *from)
 {
 	struct property *prop;
@@ -113,6 +113,19 @@ property_list_move(struct property_list *to, struct property_list *from)
 		TAILQ_REMOVE(from, prop, next);
 		TAILQ_INSERT_TAIL(to, prop, next);
 	}
+}
+
+struct property *
+property_list_find(struct property_list *props, const char *name)
+{
+	struct property *prop;
+
+	TAILQ_FOREACH(prop, props, next) {
+		if (!strcmp(prop->name, name))
+			return prop;
+	}
+
+	return NULL;
 }
 
 static int
