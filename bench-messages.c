@@ -1,4 +1,24 @@
-#include "bench-mesages.h"
+#include <assert.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include "bench-messages.h"
+
+struct message {
+	ev_uint32_t type;
+	ev_uint32_t length;
+	ev_uint32_t origin_id;
+	ev_uint32_t destination_id;
+	ev_uint32_t length_remaining;
+	struct evbuffer *payload;
+	
+	union {
+		struct property_list properties;
+		struct file_list files;
+		char *error_msg;
+		char *file_name;
+	} pl;
+};
 
 static char *
 pop_string(struct evbuffer *buf, ev_ssize_t n)
@@ -37,7 +57,7 @@ push_uint32(struct evbuffer *buf, ev_uint32_t n)
 }
 
 int
-property_list_add(property_list *props, const char *k, const char *v)
+property_list_add(struct property_list *props, const char *k, const char *v)
 {
 	struct property *prop;
 
@@ -46,26 +66,45 @@ property_list_add(property_list *props, const char *k, const char *v)
 		return MSGST_FAIL;
 
 	prop->name = strdup(k);
+	if (!prop->name)
+		goto out;
 	prop->value = strdup(v);
-	if (!prop->name || !prop->value) {
-		free(prop);
-		return MSGST_FAIL;
-	}
+	if (!prop->value)
+		goto out;
 
-	TAILQ_INSERT(props, prop, next);
+	TAILQ_INSERT_TAIL(props, prop, next);
 
 	return MSGST_OK;
+
+out:
+	if (prop->name)
+		free(prop->name);
+	if (prop->value)
+		free(prop->value);
+	free(prop);
+
+	return MSGST_FAIL;
+}
+
+int
+property_list_add_long(struct property_list *props, const char *k, long v)
+{
+	char buf[128];
+
+	evutil_snprintf(buf, sizeof(buf), "%ld", v);
+	
+	return property_list_add(props, k, buf);
 }
 
 static int
-property_list_parse(property_list *props, struct evbuffer *buf)
+property_list_parse(struct property_list *props, struct evbuffer *buf)
 {
 	char *ln = NULL;
 	char *p;
 
 	while ((ln = evbuffer_readln(buf, NULL, EVBUFFER_EOL_ANY))) {
 		p = strchr(ln, ' ');
-		if (!sp)
+		if (!p)
 			goto out;
 		*p = '\0';
 		p++;
@@ -83,7 +122,7 @@ out:
 }
 
 static void
-property_list_encode(struct property_list *props, struct evbuffer *buf)
+property_list_encode(const struct property_list *props, struct evbuffer *buf)
 {
 	struct property *prop;
 	
@@ -115,47 +154,78 @@ property_list_move(struct property_list *to, struct property_list *from)
 	}
 }
 
-struct property *
+const char *
 property_list_find(struct property_list *props, const char *name)
 {
 	struct property *prop;
 
 	TAILQ_FOREACH(prop, props, next) {
 		if (!strcmp(prop->name, name))
-			return prop;
+			return prop->value;
 	}
 
 	return NULL;
 }
 
+int
+property_list_find_long(struct property_list *props,
+		        const char *name, long *lv)
+{
+	const char *v;
+	char *endp = NULL;
+	long tmp;
+
+	v = property_list_find(props, name);
+	if (!v)
+		return -1;
+	
+	errno = 0;
+	tmp = strtol(v, &endp, 10);
+	if (errno == ERANGE || !endp || endp == v || *endp != '\0')
+		return -1;
+	
+	*lv = tmp;
+
+	return 0;
+}
+
+int
+file_list_add(struct file_list *files, const char *name)
+{
+	struct file_entry *fe;
+
+	fe = calloc(1, sizeof(*fe));
+	if (!fe)
+		return MSGST_FAIL;
+	fe->name = strdup(name);
+	if (!fe->name) {
+		free(fe);
+		return MSGST_FAIL;
+	}
+
+	TAILQ_INSERT_TAIL(files, fe, next);
+
+	return MSGST_OK;
+}
+
 static int
 file_list_parse(struct file_list *files, struct evbuffer *buf)
 {
+	int rv;
 	char *ln = NULL;
-	struct file_entry *fe;
 
 	while ((ln = evbuffer_readln(buf, NULL, EVBUFFER_EOL_ANY))) {
-		fe = calloc(1, sizeof(*fe));
-		if (!fe)
-			goto out;
-		fe->name = strdup(ln);
-		if (!fe->name)
-			goto out;
+		rv = file_list_add(files, ln);
 		free(ln);
-
-		TAILQ_INSERT_TAIL(files, fe, next);
+		if (rv != MSGST_OK)
+			return rv;
 	}
 
 	return MSGST_OK;
-
-out:
-	if (ln)
-		free(ln);
-	return MSGST_FAIL;
 }
 
 static void
-file_list_encode(struct file_list *files, struct evbuffer *buf)
+file_list_encode(const struct file_list *files, struct evbuffer *buf)
 {
 	struct file_entry *fe;
 
@@ -163,14 +233,26 @@ file_list_encode(struct file_list *files, struct evbuffer *buf)
 		evbuffer_add_printf(buf, "%s\n", fe->name);
 }
 
-static void
+void
 file_list_clear(struct file_list *files)
 {
 	struct file_entry *fe;
 
 	while ((fe = TAILQ_FIRST(files))) {
+		TAILQ_REMOVE(files, fe, next);
 		free(fe->name);
 		free(fe);
+	}
+}
+
+void
+file_list_move(struct file_list *to, struct file_list *from)
+{
+	struct file_entry *fe;
+
+	while ((fe = TAILQ_FIRST(from))) {
+		TAILQ_REMOVE(from, fe, next);
+		TAILQ_INSERT_TAIL(to, fe, next);
 	}
 }
 
@@ -254,6 +336,8 @@ message_parse_header(struct message *msg, struct evbuffer *buf)
 int
 message_read_payload(struct message *msg, struct evbuffer *buf)
 {
+	int amt;
+
 	amt = evbuffer_remove_buffer(buf, msg->payload, msg->length_remaining);
 	assert(amt <= msg->length_remaining);
 	msg->length_remaining -= amt;
@@ -264,10 +348,24 @@ message_read_payload(struct message *msg, struct evbuffer *buf)
 }
 
 int
+message_read(struct message *msg, struct evbuffer *buf)
+{
+	int rv;
+
+	if (msg->type == MSG_UNKNOWN) {
+		rv = message_parse_header(msg, buf);
+		if (rv != MSGST_OK)
+			return rv;
+	}
+
+	rv = message_read_payload(msg, buf);
+
+	return rv;
+}
+
+int
 message_parse_payload(struct message *msg)
 {
-	int amt;
-
 	assert(msg->type != MSG_UNKNOWN);
 
 	switch (msg->type) {
@@ -332,7 +430,21 @@ message_encode(struct message *msg, struct evbuffer *outbuf)
 }
 
 void
-message_encode_greeting_req(struct message *msg, struct property_list *props, struct evbuffer *outbuf)
+message_encode_ref(struct message *msg, const void *data, size_t len,
+		   struct evbuffer *outbuf)
+{
+	msg->length = len;
+	evbuffer_expand(outbuf, 16);
+	push_uint32(outbuf, msg->type);
+	push_uint32(outbuf, msg->length);
+	push_uint32(outbuf, msg->origin_id);
+	push_uint32(outbuf, msg->destination_id);
+	evbuffer_add_reference(outbuf, data, len, NULL, NULL);
+}
+
+void
+message_encode_greeting_req(struct message *msg, struct property_list *props,
+			    struct evbuffer *outbuf)
 {
 	msg->type = MSG_GREETING_REQ;
 	msg->origin_id = 0;
@@ -342,7 +454,8 @@ message_encode_greeting_req(struct message *msg, struct property_list *props, st
 }
 
 void
-message_encode_greeting_rsp(struct message *msg, ev_uint32_t client_id, struct evbuffer *outbuf)
+message_encode_greeting_rsp(struct message *msg, ev_uint32_t client_id,
+			    struct evbuffer *outbuf)
 {
 	msg->type = MSG_GREETING_RSP;
 	msg->origin_id = 0;
@@ -372,7 +485,8 @@ message_encode_file_list_req(struct message *msg, struct evbuffer *outbuf)
 }
 
 void
-message_encode_file_list_rsp(struct message *msg, struct file_list *files, struct evbuffer *outbuf)
+message_encode_file_list_rsp(struct message *msg, struct file_list *files,
+			     struct evbuffer *outbuf)
 {
 	msg->type = MSG_FILE_LIST_RSP;
 	msg->origin_id = 0;
@@ -382,29 +496,30 @@ message_encode_file_list_rsp(struct message *msg, struct file_list *files, struc
 }
 
 void
-message_encode_send_chat(struct message *msg, ev_uint32_t origin, ev_uint32_t dest,
-			 const void *chat, size_t len, struct evbuffer *outbuf)
+message_encode_send_chat(struct message *msg, ev_uint32_t origin,
+			 ev_uint32_t dest, const void *chat, size_t len,
+			 struct evbuffer *outbuf)
 {
 	msg->type = MSG_SEND_CHAT;
 	msg->origin_id = origin;
 	msg->destination_id = dest;
-	evbuffer_add(msg->payload, chat, len);
-	message_encode(msg, outbuf);
+	message_encode_ref(msg, chat, len, outbuf);
 }
 
 void
-message_encode_echo_req(struct message *msg, ev_uint32_t origin, ev_uint32_t dest,
-			const void *echo, size_t len, struct evbuffer *outbuf)
+message_encode_echo_req(struct message *msg, ev_uint32_t origin,
+			ev_uint32_t dest, const void *echo, size_t len,
+			struct evbuffer *outbuf)
 {
 	msg->type = MSG_ECHO_REQ;
 	msg->origin_id = origin;
 	msg->destination_id = dest;
-	evbuffer_add(msg->payload, chat, len);
-	message_encode(msg, outbuf);
+	message_encode_ref(msg, echo, len, outbuf);
 }
 
 void
-message_encode_echo_rsp(struct message *msg, struct message *echo, struct evbuffer *outbuf)
+message_encode_echo_rsp(struct message *msg, struct message *echo,
+			struct evbuffer *outbuf)
 {
 	msg->type = MSG_ECHO_RSP;
 	msg->origin_id = echo->destination_id;
@@ -445,11 +560,66 @@ message_encode_ok(struct message *msg, struct evbuffer *outbuf)
 }
 
 void
-message_encode_error(struct message *msg, const char *errmsg, struct evbuffer *outbuf)
+message_encode_error(struct message *msg, const char *errmsg,
+		     struct evbuffer *outbuf)
 {
 	msg->type = MSG_ERROR;
 	msg->origin_id = 0;
 	msg->destination_id = 0;
 	evbuffer_add(msg->payload, errmsg, strlen(errmsg));
 	message_encode(msg, outbuf);
+}
+
+struct evbuffer *
+message_get_payload(struct message *msg)
+{
+	return msg->payload;
+}
+
+ev_uint32_t
+message_get_type(const struct message *msg)
+{
+	return msg->type;
+}
+
+ev_uint32_t
+message_get_length(const struct message *msg)
+{
+	return msg->length;
+}
+
+ev_uint32_t
+message_get_origin(const struct message *msg)
+{
+	return msg->origin_id;
+}
+
+ev_uint32_t
+message_get_destination(const struct message *msg)
+{
+	return msg->destination_id;
+}
+
+const char *
+message_payload_get_error_msg(const struct message *msg)
+{
+	return msg->pl.error_msg;
+}
+
+const char *
+message_payload_get_file_name(const struct message *msg)
+{
+	return msg->pl.file_name;
+}
+
+struct property_list *
+message_payload_get_properties(struct message *msg)
+{
+	return &msg->pl.properties;
+}
+
+struct file_list *
+message_payload_get_files(struct message *msg)
+{
+	return &msg->pl.files;
 }

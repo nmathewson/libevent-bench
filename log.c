@@ -5,7 +5,6 @@
 
 static enum log_level min_log_level = LOG_NOTICE;
 static FILE *log_file = NULL;
-static int log_do_scrub = 1;
 
 void
 log_debug(const char *msg, ...)
@@ -82,8 +81,10 @@ log_msg_va(enum log_level lvl, int serr, const char *msg, va_list ap)
 {
 	if (lvl >= min_log_level) {
 		vfprintf(log_file, msg, ap);
+		/* XXX
 		if (serr)
 			fprintf(log_file, ": %s", socket_error_string(-1));
+		*/
 		fputs("\n", log_file);
 		fflush(log_file);
 		if (lvl >= LOG_FATAL)

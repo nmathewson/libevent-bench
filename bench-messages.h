@@ -1,6 +1,10 @@
 #ifndef _BENCH_MESSAGES_H_
 #define _BENCH_MESSAGES_H_
 
+#include <sys/queue.h>
+#include <event2/util.h>
+#include <event2/buffer.h>
+
 // messages are variable length of the basic format:
 // header:
 //   4 bytes -- message type
@@ -38,7 +42,7 @@ enum message_type {
 	MSG_ECHO_RSP,
 
 	MSG_SEND_FILE,
-	MSG_FILE_CONTENTS
+	MSG_FILE_CONTENTS,
 	
 	MSG_OK,
 	MSG_ERROR,
@@ -105,73 +109,67 @@ struct file_entry {
 };
 TAILQ_HEAD(file_list, file_entry);
 
-struct message {
-	ev_uint32_t type;
-	ev_uint32_t length;
-	ev_uint32_t origin_id;
-	ev_uint32_t destination_id;
-	ev_uint32_t length_remaining;
-	struct evbuffer *payload;
-	
-	union {
-		struct property_list properties;
-		struct file_list files;
-		char *error_msg;
-		char *file_name;
-	} pl;
-};
+struct message;
 
-inline struct evbuffer *
-message_get_payload(struct message *msg)
-{
-	return msg->payload;
-}
+int property_list_add(struct property_list *props, const char *k,
+		      const char *v);
+int property_list_add_long(struct property_list *props, const char *k, long v);
+void property_list_clear(struct property_list *props);
+void property_list_move(struct property_list *to, struct property_list *from);
+const char *property_list_find(struct property_list *props, const char *name);
+int property_list_find_long(struct property_list *props,
+		        const char *name, long *lv);
 
-inline ev_uint32_t
-message_get_type(const struct message *msg)
-{
-	return msg->type;
-}
+int file_list_add(struct file_list *files, const char *name);
+void file_list_clear(struct file_list *files);
+void file_list_move(struct file_list *to, struct file_list *from);
 
-inline ev_uint32_t
-message_get_length(const struct message *msg)
-{
-	return msg->length;
-}
+struct message *message_new(void);
+void message_reset(struct message *msg);
+void message_destroy(struct message *msg);
+int message_parse_header(struct message *msg, struct evbuffer *buf);
+int message_read_payload(struct message *msg, struct evbuffer *buf);
+int message_read(struct message *msg, struct evbuffer *buf);
+int message_parse_payload(struct message *msg);
+void message_encode(struct message *msg, struct evbuffer *outbuf);
+void message_encode_ref(struct message *msg, const void *data, size_t len,
+		   struct evbuffer *outbuf);
+void message_encode_greeting_req(struct message *msg,
+				struct property_list *props,
+				struct evbuffer *outbuf);
+void message_encode_greeting_rsp(struct message *msg, ev_uint32_t client_id,
+			    struct evbuffer *outbuf);
+void message_encode_peer_notice(struct message *msg, ev_uint32_t peer_id,
+			   const struct property_list *props,
+			   struct evbuffer *outbuf);
+void message_encode_file_list_req(struct message *msg, struct evbuffer *outbuf);
+void message_encode_file_list_rsp(struct message *msg, struct file_list *files,
+			     struct evbuffer *outbuf);
+void message_encode_send_chat(struct message *msg, ev_uint32_t origin,
+			 ev_uint32_t dest, const void *chat, size_t len,
+			 struct evbuffer *outbuf);
+void message_encode_echo_req(struct message *msg, ev_uint32_t origin,
+			ev_uint32_t dest, const void *echo, size_t len,
+			struct evbuffer *outbuf);
+void message_encode_echo_rsp(struct message *msg, struct message *echo,
+			struct evbuffer *outbuf);
+void message_encode_send_file(struct message *msg, ev_uint32_t origin,
+			 ev_uint32_t dest, const char *fn,
+			 struct evbuffer *outbuf);
+void message_encode_file_contents(struct message *msg, ev_uint32_t origin,
+			     ev_uint32_t dest, struct evbuffer *outbuf);
+void message_encode_ok(struct message *msg, struct evbuffer *outbuf);
+void message_encode_error(struct message *msg, const char *errmsg,
+		     struct evbuffer *outbuf);
 
-inline ev_uint32_t
-message_get_origin(const struct message *msg)
-{
-	return msg->origin_id;
-}
+struct evbuffer *message_get_payload(struct message *msg);
+ev_uint32_t message_get_type(const struct message *msg);
+ev_uint32_t message_get_length(const struct message *msg);
+ev_uint32_t message_get_origin(const struct message *msg);
+ev_uint32_t message_get_destination(const struct message *msg);
+const char *message_payload_get_error_msg(const struct message *msg);
+const char *message_payload_get_file_name(const struct message *msg);
+struct property_list *message_payload_get_properties(struct message *msg);
+struct file_list *message_payload_get_files(struct message *msg);
 
-inline ev_uint32_t
-message_get_destination(const struct message *msg)
-{
-	return msg->destination_id;
-}
-
-inline const char *
-message_payload_get_error_msg(const struct message *msg)
-{
-	return msg->pl.error_msg;
-}
-
-inline const char *
-message_payload_get_file_name(const struct message *msg)
-{
-	return msg->pl.file_name;
-}
-
-inline property_list *
-message_payload_get_properties(const struct message *msg)
-{
-	return &msg->pl.properties;
-}
-
-inline file_list *
-message_payload_get_files(const struct message *msg)
-{
-	return &msg->pl.files;
-}
 #endif

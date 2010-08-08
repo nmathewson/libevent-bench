@@ -1,5 +1,10 @@
 #include <sys/queue.h>
+#include <assert.h>
+#include <errno.h>
 #include <stdio.h>
+#include <string.h>
+#include <signal.h>
+#include <unistd.h>
 #include <event2/event.h>
 #include <event2/listener.h>
 #include <event2/bufferevent.h>
@@ -7,6 +12,9 @@
 
 #include <openssl/ssl.h>
 #include <openssl/pem.h>
+
+#include "log.h"
+#include "bench-messages.h"
 #include "ssl-utils.h"
 
 #define DEFAULT_PLAIN_ADDR "127.0.0.1:5501"
@@ -29,11 +37,13 @@ struct ssl_listener_info {
 
 struct conn {
 	ev_uint32_t id;
-	struct event_base *base;
 	struct bufferevent *bev;
 	struct message *inmsg;
 	struct message *outmsg;
+	struct evbuffer *inbuf;
+	struct evbuffer *outbuf;
 	struct property_list properties;
+	long notifications;
 };
 
 /* valid client id's start at one. if a client has an id of zero, the
@@ -62,22 +72,32 @@ active_conns_add(struct conn *conn)
 			amt = 16;
 		else
 			amt <<= 1;
-		newconns = realloc(active_conns, amt);
+		newconns = realloc(active_conns, amt * sizeof(struct conn *));
 		if (!newconns)
 			return -1;
 		memset(newconns + active_conns_allocated, 0,
-		       amt - active_conns_allocated);
+		       (amt - active_conns_allocated) * sizeof(struct conn *));
 		active_conns_allocated = amt;
 		active_conns = newconns;
 	}
 
-	assert(active_conns[conns->id] == NULL);
+	assert(active_conns[conn->id] == NULL);
 	active_conns[conn->id] = conn;
+
+	return 0;
+}
+
+static inline int
+conn_has_handshaked(struct conn *conn)
+{
+	return conn->id != 0;
 }
 
 static void
 active_conns_del(struct conn *conn)
 {
+	if (!conn_has_handshaked(conn))
+		return;
 	assert(active_conns[conn->id] == conn);
 	active_conns[conn->id] = NULL;
 }
@@ -90,52 +110,51 @@ active_conns_get(ev_uint32_t id)
 	return active_conns[id];
 }
 
+static void
+conn_destroy(struct conn *conn)
+{
+	active_conns_del(conn);
+	if (conn->inmsg)
+		message_destroy(conn->inmsg);
+	if (conn->outmsg)
+		message_destroy(conn->outmsg);
+	if (conn->bev)
+		bufferevent_free(conn->bev);
+	free(conn);
+}
+
 static struct conn *
 conn_new(struct event_base *base, struct bufferevent *cbev)
 {
-	struct message *inmsg, outmsg;
 	struct conn *conn;
-
-	inmsg = message_new();
-	if (!inmsg)
-		return NULL;
-	outmsg = message_new();
-	if (!outmsg) {
-		message_destroy(inmsg)
-		return NULL;
-	}
 
 	conn = calloc(1, sizeof(*conn));
 	if (!conn)
 		return NULL;
 
 	conn->bev = cbev;
-	conn->id = 0;
-	conn->base = base;
-	conn->inmsg = inmsg;
-	conn->outmsg = outmsg;
-	conn->inbuf = evbuffer_get_input(cbev);
-	conn->outbuf = evbuffer_get_output(cbev);
+	conn->inmsg = message_new();
+	if (!conn->inmsg)
+		goto out;
+	conn->outmsg = message_new();
+	if (!conn->outmsg)
+		goto out;
+	conn->inbuf = bufferevent_get_input(cbev);
+	conn->outbuf = bufferevent_get_output(cbev);
 	TAILQ_INIT(&conn->properties);
 
 	return conn;
-}
 
-static void
-conn_destroy(struct conn *conn)
-{
-	message_destroy(conn->inmsg);
-	message_destroy(conn->outmsg);
-	bufferevent_free(conn->bev);
-	free(conn);
+out:
+	conn_destroy(conn);
+
+	return NULL;
 }
 
 static void
 conn_create(struct event_base *base, struct bufferevent *bev)
 {
-	size_t i;
 	struct conn *conn;
-	struct message *msg;
 
 	conn = conn_new(base, bev);
 	if (!conn) {
@@ -152,22 +171,18 @@ conn_create(struct event_base *base, struct bufferevent *bev)
 static void
 conn_send_error(struct conn *conn, const char *what)
 {
+	log_warn("server: error: %s", what);
 	message_encode_error(conn->outmsg, what, conn->outbuf);
-	message_reset(conn->inmsg);
-	message_reset(conn->outmsg);
 }
 
-static inline int
-conn_has_handshaked(struct conn *conn)
+static inline void
+conn_send_peer_notice(struct conn *conn, struct conn *peer)
 {
-	return conn->id != 0;
-}
-
-static int
-conn_process_input(struct conn *conn)
-{
-	if (message_parse_payload(conn->inmsg) != MSGST_OK)
-		return -1;
+	if (!conn->notifications)
+		return;
+	message_encode_peer_notice(conn->outmsg, peer->id,
+			&peer->properties, conn->outbuf);
+	conn->notifications--;
 }
 
 static int
@@ -175,13 +190,21 @@ conn_finish_setup(struct conn *conn)
 {
 	ev_uint32_t i;
 
-	if (conn_process_input(conn) < 0) {
+	if (message_parse_payload(conn->inmsg) != MSGST_OK) {
 		log_warn("server: handshake with client failed");
 		return -1;
 	}
 
 	property_list_move(&conn->properties,
 			   message_payload_get_properties(conn->inmsg));
+
+	conn->notifications = 0;
+	property_list_find_long(&conn->properties, "max_peer_notifications",
+				&conn->notifications);
+	if (conn->notifications) {
+		log_debug("server: client %u can recv %ld peer notifications",
+			  (unsigned)conn->id, conn->notifications);
+	}
 
 	active_conns_add(conn);
 
@@ -190,14 +213,10 @@ conn_finish_setup(struct conn *conn)
 
 	for (i = 0; i < id_count; ++i) {
 		struct conn *ac = active_conns[i];
-		if (ac == conn)
+		if (!ac)
 			continue;
-		message_encode_peer_notice(ac->outmsg, conn->id,
-					   &conn->properties,
-					   ac->outbuf);
-		message_encode_peer_notice(conn->outmsg, ac->id,
-					   &ac->properties,
-					   ac->outbuf);
+		conn_send_peer_notice(ac, conn);
+		conn_send_peer_notice(conn, ac);
 	}
 
 	return 0;
@@ -208,7 +227,7 @@ conn_relay_chat(struct conn *conn)
 {
 	struct conn *dest_conn;
 
-	dest_conn = active_conns_get(message_get_destination(conn->outmsg));
+	dest_conn = active_conns_get(message_get_destination(conn->inmsg));
 	if (!dest_conn) {
 		conn_send_error(conn, "unknown destination");
 		return -1;
@@ -223,20 +242,22 @@ static int
 conn_send_file(struct conn *conn)
 {
 	struct conn *dest_conn;
-	struct file_ent *fe;
+	struct file_entry *fe;
 	const char *fname;
 	int found;
 	FILE *fp;
 	char buf[1024];
 	size_t amt;
 
-	if (conn_process_input(conn) < 0)
+	if (message_parse_payload(conn->inmsg) != MSGST_OK) {
+		log_warn("server: invalid file request");
 		return -1;
+	}
 
 	dest_conn = active_conns_get(message_get_destination(conn->inmsg));
 	if (!dest_conn) {
 		conn_send_error(conn, "destination unknown");
-		return -1;
+		return 0;
 	}
 
 	fname = message_payload_get_file_name(conn->inmsg);
@@ -251,14 +272,14 @@ conn_send_file(struct conn *conn)
 	}
 	if (!found) {
 		conn_send_error(conn, "unknown file");
-		return -1;
+		return 0;
 	}
 
 	fp = fopen(fname, "rb");
 	if (!fp) {
 		log_error("server: unable to open %s!", fname);
 		conn_send_error(conn, "unable to open file");
-		return -1;
+		return 0;
 	}
 
 	/* XXX this isn't very efficient */
@@ -274,49 +295,45 @@ conn_send_file(struct conn *conn)
 	return 0;
 }
 
-static void
-conn_read_cb(struct bufferevent *bev, void *_conn)
+static int
+conn_read_message(struct conn *conn)
 {
-	struct conn *conn = _conn;
-	int rv = MSGST_OK;
+	int rv;
 
-	if (message_get_type(conn->inmsg) == MSG_UNKNOWN) {
-		rv = message_parse_header(conn->inmsg, conn->inbuf);
-		if (rv <= MSGST_CONT) {
-			if (rv == MSGST_FAIL) {
-				log_warn("server: received malformed message");
-				conn_destroy(conn);
-			}
-			return;
+	rv = message_read(conn->inmsg, conn->inbuf);
+	if (rv <= MSGST_CONT) {
+		if (rv == MSGST_FAIL) {
+			log_warn("server: received malformed message");
+			conn_destroy(conn);
 		}
-	} else if (message_read_payload(conn->inmsg, conn->inbuf) != MSGST_OK)
-		return;
-
-	if (conn_has_handshaked(conn) &&
-	    message_get_type(conn->inmsg) != MSG_GREETING_REQ) {
-		conn_send_error(conn, "first message must be greeting");
-		return;
+		return -1;
 	}
+
+	if (!conn_has_handshaked(conn) &&
+	    message_get_type(conn->inmsg) != MSG_GREETING_REQ) {
+		log_warn("server: client messaging without greeting first");
+		conn_destroy(conn);
+		return -1;
+	}
+
+	rv = 0;
 
 	switch (message_get_type(conn->inmsg)) {
 	case MSG_GREETING_REQ:
-		if (conn_finish_setup(conn) < 0)
-			return;
+		rv = conn_finish_setup(conn);
 		break;
 	case MSG_SEND_CHAT:
 	case MSG_ECHO_REQ:
 	case MSG_ECHO_RSP:
 		/* Forward a chat message to another client. */
-		if (conn_relay_chat(conn) < 0)
-			return;
+		rv = conn_relay_chat(conn);
 		break;
 	case MSG_FILE_LIST_REQ:
 		message_encode_file_list_rsp(conn->outmsg, &server_files,
 					     conn->outbuf);
 		break;
 	case MSG_SEND_FILE:
-		if (conn_send_file(conn) < 0)
-			return;
+		rv = conn_send_file(conn);
 		break;
 
 	/* These messages shouldn't be sent to the server. */
@@ -327,10 +344,26 @@ conn_read_cb(struct bufferevent *bev, void *_conn)
 	case MSG_FILE_LIST_RSP:
 	case MSG_GREETING_RSP:
 		conn_send_error(conn, "server received invalid message");
-		return;
+		break;
 	}
 
 	message_reset(conn->inmsg);
+	message_reset(conn->outmsg);
+
+	if (rv < 0)
+		conn_destroy(conn);
+
+	return rv;
+}
+
+static void
+conn_read_cb(struct bufferevent *bev, void *_conn)
+{
+	struct conn *conn = _conn;
+
+	while (evbuffer_get_length(conn->inbuf) &&
+	       !conn_read_message(conn))
+		;
 }
 
 static void
@@ -344,6 +377,20 @@ static void
 conn_event_cb(struct bufferevent *bev, short what, void *_conn)
 {
 	struct conn *conn = _conn;
+
+	/* SSL */
+	if (what & BEV_EVENT_CONNECTED)
+		return;
+
+	if (what & BEV_EVENT_ERROR) {
+		log_warn("server: socket error: %s",
+			 evutil_socket_error_to_string(
+				evutil_socket_geterror(-1)));
+	} else {
+		log_debug("server: connection %u closed", (unsigned)conn->id);
+	}
+
+	conn_destroy(conn);
 }
 
 static void
@@ -366,7 +413,6 @@ listener_ssl_cb(struct evconnlistener *listener, evutil_socket_t s,
 	struct event_base *base;
 	struct bufferevent *bev;
 	SSL *ssl;
-	struct conn *conn;
 
 	base = evconnlistener_get_base(listener);
 
@@ -387,6 +433,8 @@ main(int argc, char **argv)
 	struct ssl_listener_info info;
 	int len = sizeof(struct sockaddr_storage);
 
+	signal(SIGPIPE, SIG_IGN);
+
 	evutil_parse_sockaddr_port(DEFAULT_PLAIN_ADDR,
 				(struct sockaddr *)&listener_plain_addr, &len);
 	evutil_parse_sockaddr_port(DEFAULT_SSL_ADDR,
@@ -400,18 +448,20 @@ main(int argc, char **argv)
 	info.ctx = SSL_CTX_new(SSLv23_method());
 
 	chdir(server_base_path);
+	log_set_file(NULL);
 
 	base = event_base_new();
 
 	listener_plain = evconnlistener_new_bind(base, listener_plain_cb, NULL,
 			LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, -1,
-			(struct sockaddr *)&listener_plain_addr,
-			sizeof(listener_plain_addr));
+			(struct sockaddr *)&listener_plain_addr, len);
 
 	listener_ssl = evconnlistener_new_bind(base, listener_ssl_cb, &info,
 			LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, -1,
-			(struct sockaddr *)&listener_ssl_addr,
-			sizeof(listener_ssl_addr));
+			(struct sockaddr *)&listener_ssl_addr, len);
+
+	evconnlistener_enable(listener_plain);
+	evconnlistener_enable(listener_ssl);
 
 	event_base_dispatch(base);
 
