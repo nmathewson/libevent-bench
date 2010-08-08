@@ -131,38 +131,40 @@ int message_parse_header(struct message *msg, struct evbuffer *buf);
 int message_read_payload(struct message *msg, struct evbuffer *buf);
 int message_read(struct message *msg, struct evbuffer *buf);
 int message_parse_payload(struct message *msg);
-void message_encode(struct message *msg, struct evbuffer *outbuf);
-void message_encode_ref(struct message *msg, const void *data, size_t len,
+size_t message_encode(struct message *msg, struct evbuffer *outbuf);
+size_t message_encode_ref(struct message *msg, const void *data, size_t len,
 		   struct evbuffer *outbuf);
-void message_encode_greeting_req(struct message *msg,
+size_t message_encode_greeting_req(struct message *msg,
 				struct property_list *props,
 				struct evbuffer *outbuf);
-void message_encode_greeting_rsp(struct message *msg, ev_uint32_t client_id,
+size_t message_encode_greeting_rsp(struct message *msg, ev_uint32_t client_id,
 			    struct evbuffer *outbuf);
-void message_encode_peer_notice(struct message *msg, ev_uint32_t peer_id,
+size_t message_encode_peer_notice(struct message *msg, ev_uint32_t peer_id,
 			   const struct property_list *props,
 			   struct evbuffer *outbuf);
-void message_encode_file_list_req(struct message *msg, struct evbuffer *outbuf);
-void message_encode_file_list_rsp(struct message *msg, struct file_list *files,
-			     struct evbuffer *outbuf);
-void message_encode_send_chat(struct message *msg, ev_uint32_t origin,
+size_t message_encode_file_list_req(struct message *msg,
+			struct evbuffer *outbuf);
+size_t message_encode_file_list_rsp(struct message *msg,
+		struct file_list *files, struct evbuffer *outbuf);
+size_t message_encode_send_chat(struct message *msg, ev_uint32_t origin,
 			 ev_uint32_t dest, const void *chat, size_t len,
 			 struct evbuffer *outbuf);
-void message_encode_echo_req(struct message *msg, ev_uint32_t origin,
+size_t message_encode_echo_req(struct message *msg, ev_uint32_t origin,
 			ev_uint32_t dest, const void *echo, size_t len,
 			struct evbuffer *outbuf);
-void message_encode_echo_rsp(struct message *msg, struct message *echo,
+size_t message_encode_echo_rsp(struct message *msg, struct message *echo,
 			struct evbuffer *outbuf);
-void message_encode_send_file(struct message *msg, ev_uint32_t origin,
+size_t message_encode_send_file(struct message *msg, ev_uint32_t origin,
 			 ev_uint32_t dest, const char *fn,
 			 struct evbuffer *outbuf);
-void message_encode_file_contents(struct message *msg, ev_uint32_t origin,
+size_t message_encode_file_contents(struct message *msg, ev_uint32_t origin,
 			     ev_uint32_t dest, struct evbuffer *outbuf);
-void message_encode_ok(struct message *msg, struct evbuffer *outbuf);
-void message_encode_error(struct message *msg, const char *errmsg,
+size_t message_encode_ok(struct message *msg, struct evbuffer *outbuf);
+size_t message_encode_error(struct message *msg, const char *errmsg,
 		     struct evbuffer *outbuf);
 
 struct evbuffer *message_get_payload(struct message *msg);
+size_t message_get_total_length(const struct message *msg);
 ev_uint32_t message_get_type(const struct message *msg);
 ev_uint32_t message_get_length(const struct message *msg);
 ev_uint32_t message_get_origin(const struct message *msg);

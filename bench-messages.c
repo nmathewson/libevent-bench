@@ -417,7 +417,7 @@ message_parse_payload(struct message *msg)
 	return MSGST_OK;
 }
 
-void
+size_t
 message_encode(struct message *msg, struct evbuffer *outbuf)
 {
 	msg->length = evbuffer_get_length(msg->payload);
@@ -427,9 +427,11 @@ message_encode(struct message *msg, struct evbuffer *outbuf)
 	push_uint32(outbuf, msg->origin_id);
 	push_uint32(outbuf, msg->destination_id);
 	evbuffer_add_buffer(outbuf, msg->payload);
+
+	return msg->length + 16;
 }
 
-void
+size_t
 message_encode_ref(struct message *msg, const void *data, size_t len,
 		   struct evbuffer *outbuf)
 {
@@ -440,9 +442,11 @@ message_encode_ref(struct message *msg, const void *data, size_t len,
 	push_uint32(outbuf, msg->origin_id);
 	push_uint32(outbuf, msg->destination_id);
 	evbuffer_add_reference(outbuf, data, len, NULL, NULL);
+
+	return msg->length + 16;
 }
 
-void
+size_t
 message_encode_greeting_req(struct message *msg, struct property_list *props,
 			    struct evbuffer *outbuf)
 {
@@ -450,20 +454,20 @@ message_encode_greeting_req(struct message *msg, struct property_list *props,
 	msg->origin_id = 0;
 	msg->destination_id = 0;
 	property_list_encode(props, msg->payload);
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_greeting_rsp(struct message *msg, ev_uint32_t client_id,
 			    struct evbuffer *outbuf)
 {
 	msg->type = MSG_GREETING_RSP;
 	msg->origin_id = 0;
 	msg->destination_id = client_id;
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_peer_notice(struct message *msg, ev_uint32_t peer_id,
 			   const struct property_list *props,
 			   struct evbuffer *outbuf)
@@ -472,19 +476,19 @@ message_encode_peer_notice(struct message *msg, ev_uint32_t peer_id,
 	msg->origin_id = peer_id;
 	msg->destination_id = 0;
 	property_list_encode(props, msg->payload);
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_file_list_req(struct message *msg, struct evbuffer *outbuf)
 {
 	msg->type = MSG_FILE_LIST_REQ;
 	msg->origin_id = 0;
 	msg->destination_id = 0;
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_file_list_rsp(struct message *msg, struct file_list *files,
 			     struct evbuffer *outbuf)
 {
@@ -492,10 +496,10 @@ message_encode_file_list_rsp(struct message *msg, struct file_list *files,
 	msg->origin_id = 0;
 	msg->destination_id = 0;
 	file_list_encode(files, msg->payload);
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_send_chat(struct message *msg, ev_uint32_t origin,
 			 ev_uint32_t dest, const void *chat, size_t len,
 			 struct evbuffer *outbuf)
@@ -503,10 +507,10 @@ message_encode_send_chat(struct message *msg, ev_uint32_t origin,
 	msg->type = MSG_SEND_CHAT;
 	msg->origin_id = origin;
 	msg->destination_id = dest;
-	message_encode_ref(msg, chat, len, outbuf);
+	return message_encode_ref(msg, chat, len, outbuf);
 }
 
-void
+size_t
 message_encode_echo_req(struct message *msg, ev_uint32_t origin,
 			ev_uint32_t dest, const void *echo, size_t len,
 			struct evbuffer *outbuf)
@@ -514,10 +518,10 @@ message_encode_echo_req(struct message *msg, ev_uint32_t origin,
 	msg->type = MSG_ECHO_REQ;
 	msg->origin_id = origin;
 	msg->destination_id = dest;
-	message_encode_ref(msg, echo, len, outbuf);
+	return message_encode_ref(msg, echo, len, outbuf);
 }
 
-void
+size_t
 message_encode_echo_rsp(struct message *msg, struct message *echo,
 			struct evbuffer *outbuf)
 {
@@ -525,10 +529,10 @@ message_encode_echo_rsp(struct message *msg, struct message *echo,
 	msg->origin_id = echo->destination_id;
 	msg->destination_id = echo->origin_id;
 	evbuffer_add_buffer(msg->payload, echo->payload);
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_send_file(struct message *msg, ev_uint32_t origin,
 			 ev_uint32_t dest, const char *fn,
 			 struct evbuffer *outbuf)
@@ -537,29 +541,29 @@ message_encode_send_file(struct message *msg, ev_uint32_t origin,
 	msg->origin_id = origin;
 	msg->destination_id = dest;
 	evbuffer_add(msg->payload, fn, strlen(fn));
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_file_contents(struct message *msg, ev_uint32_t origin,
 			     ev_uint32_t dest, struct evbuffer *outbuf)
 {
 	msg->type = MSG_FILE_CONTENTS;
 	msg->origin_id = origin;
 	msg->destination_id = dest;
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_ok(struct message *msg, struct evbuffer *outbuf)
 {
 	msg->type = MSG_OK;
 	msg->origin_id = 0;
 	msg->destination_id = 0;
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
-void
+size_t
 message_encode_error(struct message *msg, const char *errmsg,
 		     struct evbuffer *outbuf)
 {
@@ -567,13 +571,19 @@ message_encode_error(struct message *msg, const char *errmsg,
 	msg->origin_id = 0;
 	msg->destination_id = 0;
 	evbuffer_add(msg->payload, errmsg, strlen(errmsg));
-	message_encode(msg, outbuf);
+	return message_encode(msg, outbuf);
 }
 
 struct evbuffer *
 message_get_payload(struct message *msg)
 {
 	return msg->payload;
+}
+
+size_t
+message_get_total_length(const struct message *msg)
+{
+	return 16 + msg->length;
 }
 
 ev_uint32_t

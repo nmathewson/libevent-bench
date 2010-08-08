@@ -33,4 +33,7 @@ void log_set_min_level(enum log_level lvl);
 enum log_level log_get_min_level(void);
 void log_set_file(FILE *fp);
 
+void log_raise_min_level(void);
+void log_lower_min_level(void);
+
 #endif

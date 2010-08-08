@@ -112,3 +112,49 @@ log_set_file(FILE *fp)
 	else
 		log_file = fp;
 }
+
+void
+log_raise_min_level(void)
+{
+	switch (min_log_level) {
+	case LOG_DEBUG:
+		min_log_level = LOG_INFO;
+		break;
+	case LOG_INFO:
+		min_log_level = LOG_NOTICE;
+		break;
+	case LOG_NOTICE:
+		min_log_level = LOG_WARN;
+		break;
+	case LOG_WARN:
+		min_log_level = LOG_ERROR;
+		break;
+	case LOG_ERROR:
+	case LOG_FATAL:
+		min_log_level = LOG_FATAL;
+		break;
+	}
+}
+
+void
+log_lower_min_level(void)
+{
+	switch (min_log_level) {
+	case LOG_DEBUG:
+	case LOG_INFO:
+		min_log_level = LOG_DEBUG;
+		break;
+	case LOG_NOTICE:
+		min_log_level = LOG_INFO;
+		break;
+	case LOG_WARN:
+		min_log_level = LOG_NOTICE;
+		break;
+	case LOG_ERROR:
+		min_log_level = LOG_WARN;
+		break;
+	case LOG_FATAL:
+		min_log_level = LOG_ERROR;
+		break;
+	}
+}

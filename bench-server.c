@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <event2/event.h>
+#include <event2/event_struct.h>
 #include <event2/listener.h>
 #include <event2/bufferevent.h>
 #include <event2/bufferevent_ssl.h>
@@ -19,7 +20,6 @@
 
 #define DEFAULT_PLAIN_ADDR "127.0.0.1:5501"
 #define DEFAULT_SSL_ADDR "127.0.0.1:5502"
-#define DEFAULT_BASE_PATH "./"
 
 static void conn_read_cb(struct bufferevent *bev, void *_conn);
 static void conn_write_cb(struct bufferevent *bev, void *_conn);
@@ -35,6 +35,13 @@ struct ssl_listener_info {
 	EVP_PKEY *key;
 };
 
+struct data_stats {
+	ev_uint64_t bytes_written;
+	ev_uint64_t messages_written;
+	ev_uint64_t bytes_read;
+	ev_uint64_t messages_read;
+};
+
 struct conn {
 	ev_uint32_t id;
 	struct bufferevent *bev;
@@ -44,6 +51,8 @@ struct conn {
 	struct evbuffer *outbuf;
 	struct property_list properties;
 	long notifications;
+	struct data_stats stats_total;
+	struct data_stats stats_pending;
 };
 
 /* valid client id's start at one. if a client has an id of zero, the
@@ -55,8 +64,14 @@ static struct sockaddr_storage listener_plain_addr;
 static struct sockaddr_storage listener_ssl_addr;
 static struct evconnlistener *listener_plain = NULL;
 static struct evconnlistener *listener_ssl = NULL;
-static const char *server_base_path = DEFAULT_BASE_PATH;
 static struct file_list server_files;
+static ev_uint32_t global_read_rate = 0xffffffff;
+static ev_uint32_t global_write_rate = 0xffffffff;
+static ev_uint32_t bucket_tick = 1000;
+static int print_stats_interval = 5;
+static struct bufferevent_rate_limit_group *global_rate_limit = NULL;
+static struct data_stats global_data_stats = {0,0,0,0};
+static struct data_stats global_data_stats_last = {0,0,0,0};
 
 static int
 active_conns_add(struct conn *conn)
@@ -152,6 +167,22 @@ out:
 }
 
 static void
+conn_update_write_stats(struct conn *conn)
+{
+	conn->stats_pending.messages_written++;
+	conn->stats_pending.bytes_written +=
+		message_get_total_length(conn->outmsg);
+}
+
+static void
+conn_update_read_stats(struct conn *conn)
+{
+	conn->stats_pending.messages_read++;
+	conn->stats_pending.bytes_read +=
+		message_get_total_length(conn->inmsg);
+}
+
+static void
 conn_create(struct event_base *base, struct bufferevent *bev)
 {
 	struct conn *conn;
@@ -166,6 +197,9 @@ conn_create(struct event_base *base, struct bufferevent *bev)
 			  conn_event_cb, conn);
 
 	bufferevent_enable(bev, EV_READ|EV_WRITE);
+
+	if (global_rate_limit)
+		bufferevent_add_to_rate_limit_group(bev, global_rate_limit);
 }
 
 static void
@@ -234,7 +268,8 @@ conn_relay_chat(struct conn *conn)
 	}
 
 	message_encode(conn->inmsg, dest_conn->outbuf);
-		
+	conn_update_write_stats(conn);
+	
 	return 0;
 }
 
@@ -292,6 +327,8 @@ conn_send_file(struct conn *conn)
 		message_get_origin(conn->inmsg), dest_conn->id,
 		dest_conn->outbuf);
 
+	conn_update_write_stats(conn);
+	
 	return 0;
 }
 
@@ -315,6 +352,8 @@ conn_read_message(struct conn *conn)
 		conn_destroy(conn);
 		return -1;
 	}
+
+	conn_update_read_stats(conn);
 
 	rv = 0;
 
@@ -370,7 +409,18 @@ static void
 conn_write_cb(struct bufferevent *bev, void *_conn)
 {
 	struct conn *conn = _conn;
-	// XXX if conn is in flush-and-close mode, close it here
+
+	global_data_stats.messages_written +=
+		conn->stats_pending.messages_written;
+	global_data_stats.bytes_written +=
+		conn->stats_pending.bytes_written;
+
+	conn->stats_total.messages_written +=
+		conn->stats_pending.messages_written;
+	conn->stats_total.bytes_written +=
+		conn->stats_pending.bytes_written;
+
+	memset(&conn->stats_pending, 0, sizeof(conn->data_stats));
 }
 
 static void
@@ -394,74 +444,198 @@ conn_event_cb(struct bufferevent *bev, short what, void *_conn)
 }
 
 static void
-listener_plain_cb(struct evconnlistener *listener, evutil_socket_t s,
-		  struct sockaddr *addr, int socklen, void *arg)
+print_stats_cb(evutil_socket_t s, short what, void *arg)
 {
-	struct event_base *base;
-	struct bufferevent *bev;
+	double messages_written_per_sec;
+	double bytes_written_per_sec;
+	double messages_read_per_sec;
+	double bytes_read_per_sec;
+	
+	messages_written_per_sec =
+		(double)(global_data_stats.messages_written -
+			 global_data_stats_last.messages_written) /
+		(double)print_stats_interval;
 
-	base = evconnlistener_get_base(listener);
-	bev = bufferevent_socket_new(base, s, BEV_OPT_CLOSE_ON_FREE);
-	conn_create(base, bev);
+	bytes_written_per_sec =
+		(double)(global_data_stats.bytes_written -
+			 global_data_stats_last.bytes_written) /
+		(double)print_stats_interval;
+
+	messages_read_per_sec =
+		(double)(global_data_stats.messages_read -
+			 global_data_stats_last.messages_read) /
+		(double)print_stats_interval;
+
+	bytes_read_per_sec =
+		(double)(global_data_stats.bytes_read -
+			 global_data_stats_last.bytes_read) /
+		(double)print_stats_interval;
+
+	memcpy(&global_data_stats_last, &global_data_stats,
+		sizeof(global_data_stats));
+
+	log_notice("server: rates, msgs w/sec %lf, bytes w/sec %lf, "
+		   "msgs r/sec %lf, bytes r/sec %lf",
+		   messages_written_per_sec,
+		   bytes_written_per_sec,
+		   messages_read_per_sec,
+		   bytes_read_per_sec);
 }
 
 static void
-listener_ssl_cb(struct evconnlistener *listener, evutil_socket_t s,
-		struct sockaddr *addr, int socklen, void *arg)
+listener_cb(struct evconnlistener *listener, evutil_socket_t s,
+	    struct sockaddr *addr, int socklen, void *arg)
 {
 	struct ssl_listener_info *info = arg;
 	struct event_base *base;
 	struct bufferevent *bev;
-	SSL *ssl;
 
 	base = evconnlistener_get_base(listener);
 
-	ssl = SSL_new(info->ctx);
-	SSL_use_certificate(ssl, info->cert);
-	SSL_use_PrivateKey(ssl, info->key);
+	if (info) {
+		SSL *ssl = SSL_new(info->ctx);
+		SSL_use_certificate(ssl, info->cert);
+		SSL_use_PrivateKey(ssl, info->key);
 
-	bev = bufferevent_openssl_socket_new(base, s, ssl,
-			BUFFEREVENT_SSL_ACCEPTING,
-			BEV_OPT_CLOSE_ON_FREE);
+		bev = bufferevent_openssl_socket_new(base, s, ssl,
+				BUFFEREVENT_SSL_ACCEPTING,
+				BEV_OPT_CLOSE_ON_FREE);
+	} else {
+		bev = bufferevent_socket_new(base, s, BEV_OPT_CLOSE_ON_FREE);
+	}
+
 	conn_create(base, bev);
+}
+
+static void
+usage(void)
+{
+	printf("usage: server [-lsrwtvq] [file1 file2 ...]\n");
+	printf("-l [ plain_listen_addr | none ]\n"
+	       "-s [ ssl_listen_addr | none ]\n"
+	       "-r global_read_rate_bps\n"
+	       "-w global_write_rate_bps\n"
+               "-t bucket_tick_ms\n"
+	       "-v\n"
+	       "-q\n");
+	exit(0);
+}
+
+static void
+set_global_rate_limit(struct event_base *base)
+{
+	struct ev_token_bucket_cfg *cfg;
+	struct timeval tick = {0,0};
+
+	if (global_read_rate < 0xffffffff || global_write_rate < 0xffffffff) {
+		tick.tv_usec = bucket_tick * 1000;
+		cfg = ev_token_bucket_cfg_new(global_read_rate,
+				global_read_rate, global_write_rate,
+				global_write_rate, &tick);
+		if (!cfg)
+			log_fatal("server: can't allocate rate limit cfg!");
+		global_rate_limit = bufferevent_rate_limit_group_new(base, cfg);
+		if (!global_rate_limit)
+			log_fatal("server: can't allocate rate limit group!");
+	}
 }
 
 int
 main(int argc, char **argv)
 {
 	struct event_base *base;
+	struct event print_stats;
 	struct ssl_listener_info info;
-	int len = sizeof(struct sockaddr_storage);
-
-	signal(SIGPIPE, SIG_IGN);
-
+	int ssl_len, plain_len;
+	int c, rv, i;
+	struct timeval interval;
+	
+	ssl_len = plain_len = sizeof(struct sockaddr_storage);
+	
 	evutil_parse_sockaddr_port(DEFAULT_PLAIN_ADDR,
-				(struct sockaddr *)&listener_plain_addr, &len);
+				(struct sockaddr *)&listener_plain_addr,
+				&ssl_len);
 	evutil_parse_sockaddr_port(DEFAULT_SSL_ADDR,
-				(struct sockaddr *)&listener_ssl_addr, &len);
-	ssl_init();
-
-	// XXX parse cmd line args
-
-	info.key = ssl_build_key();
-	info.cert = ssl_build_cert(info.key);
-	info.ctx = SSL_CTX_new(SSLv23_method());
-
-	chdir(server_base_path);
+				(struct sockaddr *)&listener_ssl_addr,
+				&plain_len);
+	signal(SIGPIPE, SIG_IGN);
+	
 	log_set_file(NULL);
 
+	while ((c = getopt(argc, argv, "l:s:r:w:t:vq")) != -1) {
+		switch (c) {
+		case 'l':
+			rv = evutil_parse_sockaddr_port(optarg,
+				(struct sockaddr *)&listener_ssl_addr,
+				&ssl_len);
+			if (rv < 0)
+				ssl_len = -1;
+			break;
+		case 's':
+			rv = evutil_parse_sockaddr_port(optarg,
+				(struct sockaddr *)&listener_plain_addr,
+				&plain_len);
+			if (rv < 0)
+				plain_len = -1;
+			break;
+		case 'r':
+			global_read_rate = atoi(optarg);	
+			break;
+		case 'w':
+			global_write_rate = atoi(optarg);	
+			break;
+		case 't':
+			bucket_tick = atoi(optarg);	
+			break;
+		case 'v':
+			log_lower_min_level();
+			break;
+		case 'q':
+			log_raise_min_level();
+			break;
+		default:
+			usage();
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	TAILQ_INIT(&server_files);
+	for (i = 0; i < argc; ++i)
+		file_list_add(&server_files, argv[i]);
+	if (plain_len < 0 && ssl_len < 0)
+		usage();
+		
 	base = event_base_new();
+	
+	set_global_rate_limit(base);
 
-	listener_plain = evconnlistener_new_bind(base, listener_plain_cb, NULL,
-			LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, -1,
-			(struct sockaddr *)&listener_plain_addr, len);
+	event_assign(&print_stats, base, -1, EV_TIMEOUT | EV_PERSIST,
+		     print_stats_cb, NULL);
+	interval.tv_usec = 0;
+	interval.tv_sec = print_stats_interval;
+	event_add(&print_stats, &interval);
+	
+	if (plain_len >= 0) {
+		listener_plain = evconnlistener_new_bind(base, listener_cb,
+				NULL, LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE,
+				-1, (struct sockaddr *)&listener_plain_addr,
+				plain_len);
+		evconnlistener_enable(listener_plain);
+	}
 
-	listener_ssl = evconnlistener_new_bind(base, listener_ssl_cb, &info,
-			LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, -1,
-			(struct sockaddr *)&listener_ssl_addr, len);
+	if (ssl_len >= 0) {
+		ssl_init();
+		info.key = ssl_build_key();
+		info.cert = ssl_build_cert(info.key);
+		info.ctx = SSL_CTX_new(SSLv23_method());
 
-	evconnlistener_enable(listener_plain);
-	evconnlistener_enable(listener_ssl);
+		listener_ssl = evconnlistener_new_bind(base, listener_cb, &info,
+				LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, -1,
+				(struct sockaddr *)&listener_ssl_addr, ssl_len);
+		evconnlistener_enable(listener_ssl);
+	}
 
 	event_base_dispatch(base);
 
