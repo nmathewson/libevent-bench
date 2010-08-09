@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
-
+#include <unistd.h>
 #include <event2/event.h>
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
@@ -17,25 +17,8 @@
 #include "bench-messages.h"
 #include "ssl-utils.h"
 
-/*
-	1. multiple clients / process
-	2. percentage of connections use ssl
-
-	3. client process:
-		a. connect to server
-		b. handshake
-		c. wait for a threshold of peers
-		d. for each client, select a subset of peers to associate
-		   with:
-			- algorithm: do what libevent does for activating
-			  events w/ select and poll: iterate starting at a
-			  random index.
-		e. run benchmarking operations:
-			- ???
-
-	notes:
-		- there is one list of peers per process
-*/
+#define DEFAULT_PLAIN_ADDR "127.0.0.1:5501"
+#define DEFAULT_SSL_ADDR "127.0.0.1:5502"
 
 struct peer {
 	ev_uint32_t id;
@@ -60,17 +43,17 @@ static void client_event_cb(struct bufferevent *bev, short what, void *_client);
 static void client_read_cb(struct bufferevent *bev, void *_client);
 static void client_write_cb(struct bufferevent *bev, void *_client);
 
-static size_t ssl_ratio = 3;
+static size_t ssl_divisor = 3;
 static size_t clients_connected = 0;
 static size_t num_friends = 4;
 static size_t num_clients = 64;
-static size_t max_peers = 64;
+static size_t num_peers_expected = 64;
 static size_t num_peers = 0;
 static struct peer *peers = NULL;
 static int association_complete = 0;
 static struct client_list all_clients;
 static struct file_list server_files;
-static size_t max_messages_backlogged = 16;
+static size_t max_messages_queued = 16;
 static size_t message_data_len = 2048;
 static char *message_data = NULL;
 
@@ -79,9 +62,9 @@ client_do_chat(struct client *client)
 {
 	size_t i, j;
 
-	/* TODO use a greater range of tests ! */	
+	/* TODO use a greater range of tests */	
 	for (i = 0; i < num_friends; ++i) {
-		for (j = 0; j < max_messages_backlogged; ++j) {
+		for (j = 0; j < max_messages_queued; ++j) {
 			message_encode_send_chat(client->outmsg, client->id,
 					client->friends[i]->id, message_data,
 					message_data_len, client->outbuf);
@@ -99,7 +82,7 @@ associate_peers_with_clients(void)
 		return;	
 	if (clients_connected < num_clients)
 		return;
-	if (num_peers < max_peers)
+	if (num_peers < num_peers_expected)
 		return;
 
 	log_notice("client: associating with peers, sending messages");
@@ -108,10 +91,9 @@ associate_peers_with_clients(void)
 		client->friends = calloc(num_friends, sizeof(struct peer));
 		if (!client->friends)
 			log_fatal("client: can't allocate friend list!");
+		/* XXX there could be better ways of selecting peers */
 		for (i = rand(), j = 0; j < num_friends; ++i) {
 			struct peer *p = &peers[i % num_peers];
-			/* we probably don't want a client chatting with
-			   itself */
 			if (client->id == p->id)
 				continue;
 			client->friends[j++] = p;
@@ -148,6 +130,9 @@ client_new(struct event_base *base, SSL_CTX *ctx)
 	if (!client)
 		return NULL;
 
+	TAILQ_INIT(&client->properties);
+	TAILQ_INSERT_TAIL(&all_clients, client, next);
+
 	/* Use SSL or no? */
 	if (ctx) {
 		SSL *ssl;
@@ -180,9 +165,6 @@ client_new(struct event_base *base, SSL_CTX *ctx)
 	bufferevent_setcb(client->bev, client_read_cb, client_write_cb,
 			  client_event_cb, client);
 	bufferevent_enable(client->bev, EV_READ | EV_WRITE);
-
-	TAILQ_INIT(&client->properties);
-	TAILQ_INSERT_TAIL(&all_clients, client, next);
 
 	return client;
 
@@ -217,7 +199,7 @@ client_add_peer(struct client *client)
 {
 	size_t i;
 
-	if (num_peers == max_peers) {
+	if (num_peers == num_peers_expected) {
 		log_notice("client: ignoring peer notice");
 		return 0;
 	}
@@ -234,7 +216,7 @@ client_add_peer(struct client *client)
 			   message_payload_get_properties(client->inmsg));
 
 	log_debug("client: %u/%u added peer %u", (unsigned)num_peers,
-		  (unsigned)max_peers, (unsigned)peers[i].id);
+		  (unsigned)num_peers_expected, (unsigned)peers[i].id);
 
 	associate_peers_with_clients();
 
@@ -307,6 +289,7 @@ client_read_message(struct client *client)
 	case MSG_SEND_CHAT:
 	case MSG_OK:
 	case MSG_ERROR:
+		// TODO
 		break;
 	
 	/* These messages shouldn't be sent to the client. */
@@ -345,7 +328,7 @@ client_write_cb(struct bufferevent *bev, void *_client)
 		client_do_chat(client);
 }
 
-static void
+static int
 connect_clients(struct event_base *base, struct sockaddr *plain_addr,
 		int plain_len, struct sockaddr *ssl_addr, int ssl_len)
 {
@@ -356,12 +339,21 @@ connect_clients(struct event_base *base, struct sockaddr *plain_addr,
 	SSL_CTX *ctx = NULL;
 
 	log_notice("client: starting %u clients", (unsigned)num_clients);
-
-	if (ssl_addr)
+	log_notice("client: expecting %u peers", (unsigned)num_peers_expected);
+	
+	if (ssl_addr && ssl_len >= 0) {
+		log_notice("client: starting %u ssl clients",
+			   (unsigned)(num_clients / ssl_divisor));
+		ssl_init();
 		ctx = SSL_CTX_new(SSLv23_method());
-
+		if (!ctx) {
+			log_error("client: can't allocate ssl ctx!");
+			return -1;
+		}
+	}
+			
 	for (i = 0; i < num_clients; ++i) {
-		if (ctx && !(i % ssl_ratio)) {
+		if (ctx && !(i % ssl_divisor)) {
 			saddr = ssl_addr;
 			len = ssl_len;
 			client = client_new(base, ctx);
@@ -370,17 +362,23 @@ connect_clients(struct event_base *base, struct sockaddr *plain_addr,
 			len = plain_len;
 			client = client_new(base, NULL);
 		}
-
+		if (!client) {
+			log_error("client: can't allocate client!");
+			return -1;
+		}
 		/* only first client accepts peer notification msgs */
 		property_list_add_long(&client->properties,
-				"max_peer_notifications", i?0:max_peers);
+				"max_peer_notifications",
+				i?0:num_peers_expected);
 
 		bufferevent_socket_connect(client->bev, saddr, len);
 	}
+
+	return 0;
 }
 
 static int
-allocate_global_state(void)
+initialize_globals(void)
 {
 	size_t i;
 
@@ -396,7 +394,7 @@ allocate_global_state(void)
 	for (i = 0; i < message_data_len; ++i)
 		message_data[i] = 33 + (i % 94);
 
-	peers = calloc(max_peers, sizeof(struct peer));
+	peers = calloc(num_peers_expected, sizeof(struct peer));
 	if (!peers) {
 		log_error("client: can't allocate peer list!");
 		return -1;
@@ -405,35 +403,91 @@ allocate_global_state(void)
 	return 0;
 }
 
+static void
+usage(void)
+{
+	printf("usage: client [-lsndpm] [-vq]\n");
+	printf("-l [ plain_addr | none ]\n"
+	       "-s [ ssl_addr | none]\n"
+	       "-n num_clients\n"
+	       "-d ssl_divisor (n_ssl_clients = num_clients / ssl_divisor)\n"
+	       "-p num_peers_expected\n"
+	       "-m message_data_len\n");
+	exit(0);
+}
+
 int
 main(int argc, char **argv)
 {
 	struct sockaddr_storage ssl_addr;
 	struct sockaddr_storage plain_addr;
-	int len = sizeof(struct sockaddr_storage);
+	int plain_len, ssl_len;
 	struct event_base *base;
-	int rv;
+	int rv, c;
+
+	plain_len = ssl_len = sizeof(struct sockaddr_storage);
+
+	evutil_parse_sockaddr_port(DEFAULT_PLAIN_ADDR,
+			(struct sockaddr *)&plain_addr, &plain_len);
+	evutil_parse_sockaddr_port(DEFAULT_SSL_ADDR,
+			(struct sockaddr *)&ssl_addr, &ssl_len);
 
 	signal(SIGPIPE, SIG_IGN);
 
-	if (argc < 3)
-		return 0;
-	rv = evutil_parse_sockaddr_port(argv[1], (struct sockaddr *)&plain_addr, &len);
-	printf("rv %d, len %d\n", rv, len);
-	rv = evutil_parse_sockaddr_port(argv[2], (struct sockaddr *)&ssl_addr, &len);
-	printf("rv %d, len %d\n", rv, len);
-
 	log_set_file(NULL);
-	log_set_min_level(LOG_DEBUG);	
-	ssl_init();
 
-	if (allocate_global_state() < 0)
+	while ((c = getopt(argc, argv, "l:s:n:d:p:m:vq")) != -1) {
+		switch (c) {
+		case 'l':
+			plain_len = sizeof(struct sockaddr_storage);
+			rv = evutil_parse_sockaddr_port(optarg,
+				(struct sockaddr *)&plain_addr, &plain_len);
+			if (rv < 0)
+				plain_len = -1;
+			break;
+		case 's':
+			ssl_len = sizeof(struct sockaddr_storage);
+			rv = evutil_parse_sockaddr_port(optarg,
+				(struct sockaddr *)&ssl_addr, &ssl_len);
+			if (rv < 0)
+				ssl_len = -1;
+			break;
+		case 'n':
+			num_clients = atoi(optarg);
+			break;
+		case 'd':
+			ssl_divisor = atoi(optarg);
+			break;
+		case 'p':
+			num_peers_expected = atoi(optarg);
+			break;
+		case 'm':
+			message_data_len = atoi(optarg);
+			break;
+		case 'v':
+			log_lower_min_level();
+			break;
+		case 'q':
+			log_raise_min_level();
+			break;
+		default:
+			usage();
+		}
+	}
+
+	if (initialize_globals() < 0)
 		return 1;
 
 	base = event_base_new();
-
-	connect_clients(base, (struct sockaddr *)&plain_addr, len,
-			(struct sockaddr *)&ssl_addr, len);
+	if (!base) {
+		log_error("client: can't allocate event base!");
+		return 0;
+	}
+	
+	if (connect_clients(base,
+	    (struct sockaddr *)&plain_addr, plain_len,
+	    (struct sockaddr *)&ssl_addr, ssl_len) < 0)
+		return 0;
 
 	event_base_dispatch(base);	
 			

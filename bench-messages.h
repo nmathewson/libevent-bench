@@ -131,9 +131,13 @@ int message_parse_header(struct message *msg, struct evbuffer *buf);
 int message_read_payload(struct message *msg, struct evbuffer *buf);
 int message_read(struct message *msg, struct evbuffer *buf);
 int message_parse_payload(struct message *msg);
+size_t message_encode_buf(struct message *msg, struct evbuffer *payload,
+		   struct evbuffer *outbuf);
 size_t message_encode(struct message *msg, struct evbuffer *outbuf);
 size_t message_encode_ref(struct message *msg, const void *data, size_t len,
 		   struct evbuffer *outbuf);
+size_t message_encode_relay(struct message *outmsg, struct message *inmsg,
+		     struct evbuffer *outbuf);
 size_t message_encode_greeting_req(struct message *msg,
 				struct property_list *props,
 				struct evbuffer *outbuf);

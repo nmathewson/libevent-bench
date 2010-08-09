@@ -418,17 +418,24 @@ message_parse_payload(struct message *msg)
 }
 
 size_t
-message_encode(struct message *msg, struct evbuffer *outbuf)
+message_encode_buf(struct message *msg, struct evbuffer *payload,
+		   struct evbuffer *outbuf)
 {
-	msg->length = evbuffer_get_length(msg->payload);
+	msg->length = evbuffer_get_length(payload);
 	evbuffer_expand(outbuf, 16);
 	push_uint32(outbuf, msg->type);
 	push_uint32(outbuf, msg->length);
 	push_uint32(outbuf, msg->origin_id);
 	push_uint32(outbuf, msg->destination_id);
-	evbuffer_add_buffer(outbuf, msg->payload);
+	evbuffer_add_buffer(outbuf, payload);
 
 	return msg->length + 16;
+}
+
+size_t
+message_encode(struct message *msg, struct evbuffer *outbuf)
+{
+	return message_encode_buf(msg, msg->payload, outbuf);
 }
 
 size_t
@@ -444,6 +451,16 @@ message_encode_ref(struct message *msg, const void *data, size_t len,
 	evbuffer_add_reference(outbuf, data, len, NULL, NULL);
 
 	return msg->length + 16;
+}
+
+size_t
+message_encode_relay(struct message *outmsg, struct message *inmsg,
+		     struct evbuffer *outbuf)
+{
+	outmsg->type = inmsg->type;
+	outmsg->origin_id = inmsg->origin_id;
+	outmsg->destination_id = inmsg->destination_id;
+	return message_encode_buf(outmsg, inmsg->payload, outbuf);
 }
 
 size_t
