@@ -5,18 +5,6 @@
 #include <event2/util.h>
 #include <event2/buffer.h>
 
-// messages are variable length of the basic format:
-// header:
-//   4 bytes -- message type
-//   4 bytes -- message length
-//   4 bytes -- origin id
-//   4 bytes -- destination id
-// message payload:
-//   bytes equal to the message length
-//
-// all header fields are in network byte order
-//
-
 enum message_status {
 	MSGST_FAIL = -1,
 	MSGST_CONT = 0,
@@ -49,51 +37,6 @@ enum message_type {
 
 	MSG_TYPE_MAX,
 };
-
-// message types:
-// * (client -> server) client greeting
-//    payload contains a list of client properties in the form:
-//      property_name <SP> property value <NL>
-// * (server -> client) greeting response
-//    response contains the new client's ID in the destination_id field
-//    payload is empty
-// * (server <-> client) error
-//    payload contains an ascii description of the error
-// * (server <-> client) OK
-//    empty payload
-// * (server -> client) peer notice
-//    origin_id is the ID of the new peer.
-//    payload contains its prop list
-//    NOTE: peer notices are sent out to all other peers when a new peer connects
-// * (client -> server) list files
-//    payload is empty
-// * (server -> client) file list
-//    payload contains a list of file names, one per line
-// * (client <-> server) send chat
-//    payload contains chat contents
-// * (client <-> server) echo request
-//    payload contains data to be echoed by the peer
-// * (client <-> server) echo response
-//    payload contains the original data in the echo req
-// * (client -> server) send file
-//    payload contains the name of the file to send
-// * (server -> client) file contents
-//    payload contains the file contents
-
-// 1. create message
-// 2. parse message
-// 3. property table
-
-// initial communication/handshaking:
-// 1. client connects to bench server
-// 2. client sends a greeting to server with its properties
-// 3. server sends the client its ID
-
-// client properties
-// 1. do i have a listener for direct connections? is it ssl or plain?
-//    spec: listener ssl|plain ip:port
-// 2. do reply to echo requests?
-//    spec: echo_enabled yes|no
 
 struct property {
 	char *name;
