@@ -2,9 +2,9 @@ AUTOMAKE_OPTIONS = foreign
 
 SUBDIRS = .
 
-GENERAL_SRCS = bench-messages.c log.c ssl-utils.c
+GENERAL_SRCS = bench-messages.c bench-log.c ssl-utils.c
 
-noinst_HEADERS = bench-messages.h log.h ssl-utils.h
+noinst_HEADERS = bench-messages.h bench-log.h ssl-utils.h
 client_SOURCES = bench-client.c $(GENERAL_SRCS)
 server_SOURCES = bench-server.c $(GENERAL_SRCS)
 client_CFLAGS = $(LIBEVENT_CFLAGS)

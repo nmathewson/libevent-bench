@@ -14,7 +14,7 @@
 #include <openssl/ssl.h>
 #include <openssl/pem.h>
 
-#include "log.h"
+#include "bench-log.h"
 #include "bench-messages.h"
 #include "ssl-utils.h"
 

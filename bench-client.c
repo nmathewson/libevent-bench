@@ -13,7 +13,7 @@
 #include <openssl/ssl.h>
 #include <openssl/pem.h>
 
-#include "log.h"
+#include "bench-log.h"
 #include "bench-messages.h"
 #include "ssl-utils.h"
 
@@ -44,9 +44,9 @@ static void client_read_cb(struct bufferevent *bev, void *_client);
 static void client_write_cb(struct bufferevent *bev, void *_client);
 
 static size_t ssl_divisor = 3;
-static size_t clients_connected = 0;
 static size_t num_friends = 4;
 static size_t num_clients = 64;
+static size_t num_clients_connected = 0;
 static size_t num_peers_expected = 64;
 static size_t num_peers = 0;
 static struct peer *peers = NULL;
@@ -80,7 +80,7 @@ associate_peers_with_clients(void)
 
 	if (association_complete)
 		return;	
-	if (clients_connected < num_clients)
+	if (num_clients_connected < num_clients)
 		return;
 	if (num_peers < num_peers_expected)
 		return;
@@ -183,10 +183,10 @@ client_finish_setup(struct client *client)
 	}
 
 	client->id = message_get_destination(client->inmsg);
-	clients_connected++;
+	num_clients_connected++;
 
 	log_debug("client: %u/%u connection setup complete. (id = %u)",
-		  (unsigned)clients_connected, (unsigned)num_clients,
+		  (unsigned)num_clients_connected, (unsigned)num_clients,
 		  (unsigned)client->id);
 
 	associate_peers_with_clients();

@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "log.h"
+#include "bench-log.h"
 #include "util.h"
 
 static enum log_level min_log_level = LOG_NOTICE;
