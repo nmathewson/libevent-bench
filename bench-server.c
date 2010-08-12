@@ -29,7 +29,9 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef WIN32
 #include <signal.h>
+#endif
 #include <unistd.h>
 #include <event2/event.h>
 #include <event2/event_struct.h>
@@ -638,7 +640,15 @@ main(int argc, char **argv)
 	struct timeval interval;
 	struct sockaddr_storage listener_plain_addr;
 	struct sockaddr_storage listener_ssl_addr;
-	
+#ifdef WIN32
+	WORD wVersionRequested = MAKEWORD(2,2);
+	WSADATA wsaData;
+
+	WSAStartup(wVersionRequested, &wsaData);
+#else
+	signal(SIGPIPE, SIG_IGN);
+#endif
+
 	ssl_len = plain_len = sizeof(struct sockaddr_storage);
 	
 	evutil_parse_sockaddr_port(DEFAULT_PLAIN_ADDR,
@@ -647,8 +657,7 @@ main(int argc, char **argv)
 	evutil_parse_sockaddr_port(DEFAULT_SSL_ADDR,
 				(struct sockaddr *)&listener_ssl_addr,
 				&ssl_len);
-	signal(SIGPIPE, SIG_IGN);
-	
+
 	log_set_file(NULL);
 
 	while ((c = getopt(argc, argv, "l:s:r:w:t:i:vq")) != -1) {

@@ -28,7 +28,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef WIN32
 #include <signal.h>
+#endif
 #include <unistd.h>
 #include <event2/event.h>
 #include <event2/buffer.h>
@@ -450,6 +452,15 @@ main(int argc, char **argv)
 	int plain_len, ssl_len;
 	struct event_base *base;
 	int rv, c;
+#ifdef WIN32
+	WORD wVersionRequested = MAKEWORD(2,2);
+	WSADATA wsaData;
+
+	WSAStartup(wVersionRequested, &wsaData);
+#else
+	signal(SIGPIPE, SIG_IGN);
+#endif
+
 
 	plain_len = ssl_len = sizeof(struct sockaddr_storage);
 
@@ -457,8 +468,6 @@ main(int argc, char **argv)
 			(struct sockaddr *)&plain_addr, &plain_len);
 	evutil_parse_sockaddr_port(DEFAULT_SSL_ADDR,
 			(struct sockaddr *)&ssl_addr, &ssl_len);
-
-	signal(SIGPIPE, SIG_IGN);
 
 	log_set_file(NULL);
 
